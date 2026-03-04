@@ -1,0 +1,47 @@
+# Stream 1: User Model - LoRA fine-tuning config
+# Train on RTX 3080 (10GB VRAM)
+
+model:
+  base: "state-spaces/mamba-790m-hf"
+  hidden_dim: 1024
+
+lora:
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - "in_proj"
+    - "out_proj"
+    - "x_proj"
+
+training:
+  learning_rate: 2.0e-4
+  batch_size: 4          # Limited by 10GB VRAM
+  gradient_accumulation: 4
+  max_epochs: 10
+  warmup_steps: 500
+  weight_decay: 0.01
+  max_seq_length: 512
+
+  # Forgetting prevention
+  replay_buffer_size: 1000
+  replay_mix_ratio: 0.1  # 10% replay in each batch
+
+  # Auxiliary loss
+  next_event_prediction: true
+  aux_loss_weight: 0.1
+
+heads:
+  emotional_valence:
+    type: mlp
+    layers: [1024, 256, 1]
+    activation: tanh
+    output_range: [-1.0, 1.0]
+
+  focus_topics:
+    type: mlp
+    layers: [1024, 256, 50]  # 50 topic classes
+    activation: softmax
+    top_k: 5
+
+  # drift_signal: computed directly, no training needed

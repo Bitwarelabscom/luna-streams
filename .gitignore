@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Model artifacts
+models/stream_user/*.safetensors
+models/stream_knowledge/*.safetensors
+models/stream_dynamics/*.safetensors
+*.gguf
+
+# State files
+state/
+
+# Benchmark output
+benchmark_results.json
+
+# Training data
+training/data_prep/output/
+
+# Environment
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store

@@ -1,0 +1,37 @@
+[project]
+name = "luna-streams"
+version = "0.1.0"
+description = "Luna Mamba Streams - Continuous cognition layer using Mamba state-space models"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.7.0",
+    "httpx>=0.28.0",
+    "safetensors>=0.5.0",
+    "llama-cpp-python>=0.3.0",
+    "psutil>=6.0.0",
+    "numpy>=1.26.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+    "httpx>=0.28.0",
+]
+training = [
+    "peft>=0.14.0",
+    "datasets>=3.0.0",
+    "accelerate>=1.0.0",
+    "wandb>=0.19.0",
+    "pyyaml>=6.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=75.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["luna_streams*"]

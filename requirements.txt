@@ -1,0 +1,12 @@
+# Core API
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+pydantic==2.10.4
+pydantic-settings==2.7.1
+httpx==0.28.1
+
+# ML inference (GGUF via llama.cpp - optimized C++ CPU kernels)
+llama-cpp-python==0.3.16
+safetensors==0.5.2
+numpy==1.26.4
+psutil==6.1.1
