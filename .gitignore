@@ -24,8 +24,15 @@ state/
 # Benchmark output
 benchmark_results.json
 
-# Training data
-training/data_prep/output/
+# Training data - contains personal chat messages, user facts, memory nodes
+training/data_prep/raw/
+training/data_prep/sequences.jsonl
+training/data_prep/labeled_sequences.jsonl
+training/data_prep/topic_vocabulary.json
+training/output/
+
+# Trained model weights
+*.safetensors
 
 # Environment
 .env

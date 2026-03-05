@@ -10,8 +10,11 @@ per forward pass on CPU via llama.cpp GGUF.
 """
 
 import logging
+from pathlib import Path
 
 from ..api.schemas import StructuredEvent
+from ..config import settings
+from ..heads.mlp_heads import create_user_model_heads
 from .base_stream import BaseStream
 
 logger = logging.getLogger("luna_streams.user_model")
@@ -22,6 +25,14 @@ class UserModelStream(BaseStream):
 
     def __init__(self):
         super().__init__(name="user_model", hidden_dim=1024)
+
+        # Load trained MLP heads
+        heads_path = Path(settings.model_dir) / settings.mlp_heads_path
+        self.head_manager = create_user_model_heads(str(heads_path))
+        if self.head_manager.is_loaded:
+            logger.info(f"Loaded trained MLP heads from {heads_path}")
+        else:
+            logger.warning("No trained MLP heads - using heuristic fallback")
 
     def accepts_event(self, event: StructuredEvent) -> bool:
         """User model processes memory entries and entity updates."""

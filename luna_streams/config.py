@@ -16,9 +16,12 @@ class Settings(BaseSettings):
     snapshot_retention: int = 3
 
     # GGUF inference (llama.cpp)
-    gguf_model: str = "mamba-370m/mamba-370m-q8_0.gguf"
+    gguf_model: str = "mamba-370m/mamba-370m-user-q8_0.gguf"
     gguf_n_ctx: int = 256
     gguf_n_threads: int = 8
+
+    # Trained MLP heads
+    mlp_heads_path: str = "mamba-370m/mlp_heads.safetensors"
 
     # EMA buffer
     ema_decay: float = 0.999

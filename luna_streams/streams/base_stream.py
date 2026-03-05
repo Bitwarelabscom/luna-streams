@@ -17,6 +17,7 @@ import numpy as np
 
 from ..api.schemas import StructuredEvent
 from ..config import settings
+from ..heads.mlp_heads import HeadManager
 from .ema_buffer import EMABuffer
 from .state_manager import StateManager
 
@@ -38,6 +39,7 @@ class BaseStream(ABC):
         self.events_processed = 0
         self.model = None
         self.head_outputs: dict = {}
+        self.head_manager: Optional[HeadManager] = None
 
     @abstractmethod
     def accepts_event(self, event: StructuredEvent) -> bool:
@@ -154,15 +156,30 @@ class BaseStream(ABC):
     def _run_heads(self, hidden_state: np.ndarray) -> dict:
         """Run output heads on the hidden state.
 
-        Phase 4: Basic heads from the state vector.
-        Later phases add trained MLP heads.
+        Uses trained MLP heads if loaded, otherwise falls back to heuristics.
         """
-        return {
+        result = {
             "drift_signal": self.ema.drift_signal,
             "state_norm": self.ema.state_norm,
-            "emotional_valence": float(np.tanh(hidden_state[0])),
-            "focus_intensity": float(np.clip(np.linalg.norm(hidden_state[:64]), 0, 1)),
         }
+
+        if self.head_manager and self.head_manager.is_loaded:
+            head_out = self.head_manager.run_all(hidden_state)
+            if "emotional_valence" in head_out:
+                result["emotional_valence"] = float(head_out["emotional_valence"][0])
+            if "focus_topics" in head_out:
+                topics = head_out["focus_topics"]
+                top_indices = np.argsort(topics)[-5:][::-1]
+                result["focus_topics"] = [int(i) for i in top_indices]
+                result["focus_intensity"] = float(np.max(topics))
+            if "next_event" in head_out:
+                result["next_event_type"] = int(np.argmax(head_out["next_event"]))
+        else:
+            # Heuristic fallback
+            result["emotional_valence"] = float(np.tanh(hidden_state[0]))
+            result["focus_intensity"] = float(np.clip(np.linalg.norm(hidden_state[:64]), 0, 1))
+
+        return result
 
     def _pseudo_hidden_state(self, event: StructuredEvent) -> np.ndarray:
         """Generate a deterministic pseudo hidden state for stub mode testing."""

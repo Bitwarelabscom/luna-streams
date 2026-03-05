@@ -2,16 +2,21 @@
 
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 
 from .api.routes import init_routes, router
 from .config import settings
 
+if TYPE_CHECKING:
+    from .integration.context_injector import ContextInjector
+
 
 def create_app(
     event_queue: asyncio.Queue | None = None,
     stream_states: dict | None = None,
+    context_injector: "ContextInjector | None" = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application."""
 
@@ -37,7 +42,7 @@ def create_app(
             "conversation_dynamics": {"status": "not_loaded", "events_processed": 0, "head_outputs": {}},
         }
 
-    init_routes(event_queue, stream_states)
+    init_routes(event_queue, stream_states, context_injector=context_injector)
     app.include_router(router)
 
     return app

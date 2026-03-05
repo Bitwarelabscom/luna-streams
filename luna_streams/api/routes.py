@@ -8,7 +8,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
@@ -23,6 +23,9 @@ from .schemas import (
     StructuredEvent,
 )
 
+if TYPE_CHECKING:
+    from ..integration.context_injector import ContextInjector
+
 logger = logging.getLogger("luna_streams")
 
 router = APIRouter()
@@ -31,16 +34,19 @@ router = APIRouter()
 _start_time: float = time.time()
 _event_queue: asyncio.Queue[StructuredEvent] = asyncio.Queue()
 _stream_states: dict[str, dict] = {}
-
-# Last context cache for delta injection
-_last_context: dict[str, tuple[str, datetime]] = {}
+_context_injector: "Optional[ContextInjector]" = None
 
 
-def init_routes(event_queue: asyncio.Queue, stream_states: dict) -> None:
+def init_routes(
+    event_queue: asyncio.Queue,
+    stream_states: dict,
+    context_injector: "Optional[ContextInjector]" = None,
+) -> None:
     """Initialize shared state from main application."""
-    global _event_queue, _stream_states, _start_time
+    global _event_queue, _stream_states, _start_time, _context_injector
     _event_queue = event_queue
     _stream_states = stream_states
+    _context_injector = context_injector
     _start_time = time.time()
 
 
@@ -136,58 +142,41 @@ async def get_stream_summary(stream_name: str):
 async def get_context(user_id: Optional[str] = Query(None)):
     """Return combined context string for system prompt injection.
 
-    Uses delta tracking: returns changed=false if context hasn't
-    shifted significantly since last query.
+    Uses ContextInjector for Qwen-generated summaries with delta tracking.
     """
-    # Build context from all active streams
-    sections = []
+    context = ""
 
-    user_state = _stream_states.get("user_model", {})
-    if user_state.get("status") == "running":
-        heads = user_state.get("head_outputs", {})
-        summary = heads.get("context_summary", "")
-        if summary:
-            sections.append(f"[User State] {summary}")
+    if _context_injector is not None:
+        context = await _context_injector.generate_context(_stream_states)
+    else:
+        # Fallback: inline context building (original behavior)
+        sections = []
+        user_state = _stream_states.get("user_model", {})
+        if user_state.get("status") == "running":
+            heads = user_state.get("head_outputs", {})
+            summary = heads.get("context_summary", "")
+            if summary:
+                sections.append(f"[User State] {summary}")
 
-        drift = user_state.get("drift_signal", 0.0)
-        if drift > 0.3:
-            sections.append(f"[Drift] {drift:.2f} (high - unusual pattern)")
-        elif drift > 0.1:
-            sections.append(f"[Drift] {drift:.2f} (moderate shift)")
+            drift = user_state.get("drift_signal", 0.0)
+            if drift > 0.3:
+                sections.append(f"[Drift] {drift:.2f} (high - unusual pattern)")
+            elif drift > 0.1:
+                sections.append(f"[Drift] {drift:.2f} (moderate shift)")
 
-    knowledge_state = _stream_states.get("knowledge_graph", {})
-    if knowledge_state.get("status") == "running":
-        heads = knowledge_state.get("head_outputs", {})
-        summary = heads.get("knowledge_summary", "")
-        if summary:
-            sections.append(f"[Knowledge State] {summary}")
+        context = "\n".join(sections) if sections else ""
 
-    dynamics_state = _stream_states.get("conversation_dynamics", {})
-    if dynamics_state.get("status") == "running":
-        heads = dynamics_state.get("head_outputs", {})
-        summary = heads.get("dynamics_summary", "")
-        if summary:
-            sections.append(f"[Dynamics] {summary}")
+    token_count = len(context.split()) if context else 0
 
-    context = "\n".join(sections) if sections else ""
-    token_count = len(context.split()) if context else 0  # rough estimate
-
-    # Delta check
-    cache_key = user_id or "default"
-    last = _last_context.get(cache_key)
+    # Delta check for API response
     changed = True
-    if last and last[0] == context:
-        changed = False
-
     now = datetime.now(timezone.utc)
-    if changed and context:
-        _last_context[cache_key] = (context, now)
 
     return ContextResponse(
         context=context,
         token_count=token_count,
         changed=changed,
-        last_updated=_last_context.get(cache_key, (None, None))[1],
+        last_updated=now if context else None,
     )
 
 
@@ -237,5 +226,4 @@ async def get_snapshots(stream_name: str):
 @router.post("/api/streams/{stream_name}/rollback")
 async def rollback_stream(stream_name: str, snapshot: str = Query(...)):
     """Rollback a stream to a previous snapshot."""
-    # TODO: implement after stream runner is built (Phase 4)
     raise HTTPException(501, "Rollback not yet implemented")

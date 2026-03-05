@@ -16,7 +16,8 @@ services:
       - STREAMS_AUTO_SAVE_INTERVAL_SEC=300
       - STREAMS_SNAPSHOT_RETENTION=3
       # GGUF inference (llama.cpp)
-      - STREAMS_GGUF_MODEL=mamba-370m/mamba-370m-q8_0.gguf
+      - STREAMS_GGUF_MODEL=mamba-370m/mamba-370m-user-q8_0.gguf
+      - STREAMS_MLP_HEADS_PATH=mamba-370m/mlp_heads.safetensors
       - STREAMS_GGUF_N_CTX=256
       - STREAMS_GGUF_N_THREADS=8
       # Qwen bridge (Option B - text summaries via Ollama)
@@ -25,8 +26,8 @@ services:
       # CPU tuning
       - OMP_NUM_THREADS=8
     volumes:
-      - luna-streams-models:/app/models
-      - luna-streams-state:/app/state
+      - ./models:/app/models:ro
+      - ./state:/app/state
     networks:
       - luna-chat_luna-network
     security_opt:
@@ -41,10 +42,6 @@ services:
       timeout: 10s
       retries: 3
       start_period: 60s
-
-volumes:
-  luna-streams-models:
-  luna-streams-state:
 
 networks:
   luna-chat_luna-network:
