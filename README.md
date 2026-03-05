@@ -18,11 +18,12 @@ luna.persona.ts  <--GET /api/context--  [Context Injector] (~120 tokens)
 
 ## Inference
 
-- **Model:** `state-spaces/mamba-370m-hf` (371M params)
+- **Model:** `state-spaces/mamba-370m-hf` (371M params), LoRA fine-tuned on user data
 - **Format:** GGUF Q8_0 via llama-cpp-python (optimized C++ CPU kernels)
 - **Hardware:** AMD Ryzen 5 3600 (6-core/12-thread, AVX2), 62GB RAM
 - **Performance:** 97ms mean latency, 10.3 events/sec, 509MB RAM per stream
 - **Target:** <150ms mean latency per step -- **PASSED**
+- **MLP Heads:** 3 trained output heads (emotional_valence, focus_topics, next_event)
 
 ### Why GGUF, not PyTorch?
 
@@ -69,10 +70,9 @@ docker compose up -d
 
 # Health check
 curl http://localhost:8100/health
-
-# Copy GGUF model into the volume
-docker cp models/mamba-370m/mamba-370m-q8_0.gguf luna-streams:/app/models/mamba-370m/
 ```
+
+Models are bind-mounted from `./models/` (read-only). Place your GGUF and head weights there before starting.
 
 ## API
 
@@ -149,12 +149,16 @@ luna_streams/
     context_injector.py  # State -> text summary for prompt injection
     delta_tracker.py     # Change detection (avoids redundant context updates)
   heads/
-    mlp_heads.py         # Float/list output heads (Phase 3)
-    summary_decoder.py   # Text summary generation (Phase 5/7)
+    mlp_heads.py         # Numpy-only MLP inference (trained head weights)
+    summary_decoder.py   # Text summary generation (Phase 7)
 training/
+  TRAINING.md            # Full training guide with troubleshooting
   configs/               # LoRA fine-tuning configs per stream
-  data_prep/             # SQL export + event sequence building
-  train.py               # LoRA fine-tune (RTX 3080)
+  data_prep/
+    export_luna_data.py  # Export from PostgreSQL databases
+    build_event_sequences.py  # Convert to compact token sequences
+    generate_labels.py   # Qwen labeling oracle
+  train.py               # LoRA fine-tune (RTX 3080, ~2 min with CUDA kernels)
 ```
 
 ## Configuration
@@ -164,7 +168,8 @@ All settings via environment variables with `STREAMS_` prefix:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `STREAMS_PORT` | 8100 | HTTP port |
-| `STREAMS_GGUF_MODEL` | `mamba-370m/mamba-370m-q8_0.gguf` | GGUF model path (relative to model_dir) |
+| `STREAMS_GGUF_MODEL` | `mamba-370m/mamba-370m-user-q8_0.gguf` | GGUF model path (relative to model_dir) |
+| `STREAMS_MLP_HEADS_PATH` | `mamba-370m/mlp_heads.safetensors` | Trained MLP head weights |
 | `STREAMS_GGUF_N_CTX` | 256 | Context window size |
 | `STREAMS_GGUF_N_THREADS` | 8 | CPU threads for inference |
 | `STREAMS_EMA_DECAY` | 0.999 | Slow state EMA decay |
@@ -177,10 +182,11 @@ All settings via environment variables with `STREAMS_` prefix:
 
 - [x] Phase 0: Priority Zero benchmark -- PASSED (97ms mean)
 - [x] Phase 1: FastAPI app + event schema + memory bridge
-- [x] Phase 4: Stream 1 deployment with GGUF inference
+- [x] Phase 2: Training data prep (DB export, event sequences, Qwen labeling)
+- [x] Phase 3: LoRA fine-tune on RTX 3080 (7 epochs, val_loss 2.49, next_acc 94.6%)
+- [x] Phase 4: Stream 1 deployment with GGUF inference + trained MLP heads
 - [x] Phase 5: Luna Chat integration (client, emission, context injection)
-- [ ] Phase 2: Training data preparation (export + Qwen labels)
-- [ ] Phase 3: LoRA fine-tune Stream 1 on RTX 3080
+- [x] Context Injector: Qwen-generated summaries from head outputs with delta tracking
 - [ ] Phase 6: Validation gate (does Stream 1 provide value?)
 - [ ] Phase 7: Autoregressive summary decoder
 - [ ] Phase 8: Streams 2 (knowledge graph) + 3 (conversation dynamics)
