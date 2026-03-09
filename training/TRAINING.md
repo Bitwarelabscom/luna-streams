@@ -1,6 +1,8 @@
 # Luna Streams - Training Guide
 
-LoRA fine-tune Mamba 370M for user modeling. Produces a GGUF model + MLP head weights personalized to your Luna interaction history.
+LoRA fine-tune Mamba for user modeling. Produces a GGUF model + MLP head weights personalized to your Luna interaction history.
+
+Supports both Mamba 370M (CPU deployment) and Mamba 2.8B (GPU deployment on Tesla P4).
 
 ## Requirements
 
@@ -8,13 +10,14 @@ LoRA fine-tune Mamba 370M for user modeling. Produces a GGUF model + MLP head we
 - CUDA 12.x toolkit installed
 - Python 3.11+
 - PostgreSQL databases running (luna-chat + memorycore)
-- Ollama with Qwen 3.5:9b (for label generation)
 
 ## Training Time
 
-On an RTX 3080 with CUDA kernels: ~2 minutes total (7 epochs + merge + GGUF conversion).
-
-Without CUDA kernels (CPU fallback): ~40 minutes per epoch - unusable. See "Installing CUDA Kernels" below.
+| Model | GPU | CUDA Kernels | Time |
+|-------|-----|-------------|------|
+| 370M (fp32) | RTX 3080 | Yes | ~2 min (7 epochs) |
+| 2.8B (fp16) | RTX 3080 | Yes | ~5 min (9 epochs) |
+| Any | Any | No (CPU fallback) | ~40 min/epoch - unusable |
 
 ## Step-by-Step
 
@@ -40,6 +43,9 @@ pip install gguf
 Without these, Mamba falls back to a sequential CPU path that is 20x slower.
 
 ```bash
+# Install wheel first (needed for --no-build-isolation)
+pip install wheel
+
 # causal-conv1d - must build from source against your torch version
 git clone --depth 1 --branch v1.4.0 https://github.com/Dao-AILab/causal-conv1d.git /tmp/causal-conv1d
 cd /tmp/causal-conv1d
@@ -55,7 +61,7 @@ TORCH_CUDA_ARCH_LIST='8.6' pip install -e . --no-build-isolation
 - Set `TORCH_CUDA_ARCH_LIST` to your GPU's compute capability (8.6 for RTX 3080/3090, 8.9 for RTX 4090, 7.5 for RTX 2080)
 - Use `--no-build-isolation` so it builds against your installed torch
 - causal-conv1d v1.4.0 pairs with mamba-ssm v2.2.4 (v1.6.0 has an incompatible API)
-- If mamba-ssm's `__init__.py` fails with `GreedySearchDecoderOnlyOutput` import error, patch it to wrap the model imports in try/except - only the CUDA ops are needed
+- If mamba-ssm's `__init__.py` fails with `GreedySearchDecoderOnlyOutput` import error, patch it to wrap the model imports in try/except -- only the CUDA ops are needed
 
 **Verify kernels work:**
 ```bash
@@ -67,18 +73,7 @@ print('CUDA kernels OK')
 "
 ```
 
-### 3. Download base model
-
-```bash
-python -c "
-from transformers import AutoModelForCausalLM, AutoTokenizer
-AutoModelForCausalLM.from_pretrained('state-spaces/mamba-370m-hf')
-AutoTokenizer.from_pretrained('state-spaces/mamba-370m-hf')
-print('Model cached')
-"
-```
-
-### 4. Export your data
+### 3. Export your data
 
 Edit `data_prep/export_luna_data.py` and update the container names and database names to match your setup, then run:
 
@@ -88,7 +83,7 @@ python -m training.data_prep.export_luna_data
 
 This exports 7 tables from your luna-chat and memorycore PostgreSQL databases into `data_prep/raw/`. Verify the row counts look reasonable for your instance.
 
-### 5. Build event sequences
+### 4. Build event sequences
 
 ```bash
 python -m training.data_prep.build_event_sequences
@@ -96,24 +91,33 @@ python -m training.data_prep.build_event_sequences
 
 Converts raw exports into compact-encoded event sequences grouped by session. Output: `data_prep/sequences.jsonl`.
 
-### 6. Generate labels
+### 5. Generate labels
 
-Requires Ollama running with Qwen 3.5:9b. Edit the `QWEN_URL` in `data_prep/generate_labels.py` if your Ollama is at a different address.
+Two options:
+
+**Option A: Multi-signal heuristic labels (recommended for 2.8B)**
+
+Uses keyword matching, sentiment analysis, and recency-weighted predictions. No LLM required.
+
+```bash
+python -m training.data_prep.generate_labels_claude
+```
+
+Produces 347 labeled sequences (193 sessions + 154 global chunks with 50% overlap).
+
+**Option B: Qwen labeling oracle (original 370M approach)**
+
+Requires Ollama running with Qwen 3.5:9b.
 
 ```bash
 python -m training.data_prep.generate_labels
 ```
 
-Uses Qwen as a labeling oracle to produce:
-- `emotional_valence` (float, -1 to 1)
-- `focus_topics` (list of topic indices from a 50-class vocabulary)
-- `next_event_type` (0=memory_entry, 1=entity_update, 2=edge_update, 3=conversation_meta)
+Output for both: `data_prep/labeled_sequences.jsonl`.
 
-Falls back to heuristic labels if Qwen is unreachable. Output: `data_prep/labeled_sequences.jsonl`.
+### 6. Stop GPU services
 
-### 7. Stop GPU services
-
-Free up VRAM before training. Stop any services using the GPU (Ollama, inference servers, etc.):
+Free up VRAM before training:
 
 ```bash
 systemctl stop ollama
@@ -121,8 +125,25 @@ systemctl stop ollama
 nvidia-smi  # verify VRAM is free
 ```
 
-### 8. Train
+### 7. Train
 
+**For Mamba 2.8B (recommended):**
+```bash
+python train.py \
+  --config configs/stream1_user_2.8b.yaml \
+  --data data_prep/labeled_sequences.jsonl \
+  --output-dir output \
+  --epochs 10
+```
+
+Training details (2.8B):
+- LoRA rank 16, alpha 32 on in_proj, x_proj, dt_proj
+- fp16 with gradient accumulation 16 (effective batch 16)
+- Batch size 1 (fits in 10GB VRAM with gradient checkpointing)
+- Combined loss: causal LM + emotional valence MSE + focus topics BCE + 0.1 * next event CE
+- Best result: val_loss 1.985, next_event accuracy 95.7%, valence MAE 0.171
+
+**For Mamba 370M:**
 ```bash
 python train.py \
   --config configs/stream1_user.yaml \
@@ -131,57 +152,64 @@ python train.py \
   --epochs 10
 ```
 
-Training details:
-- LoRA rank 16, alpha 32 on in_proj, x_proj, dt_proj (1.9% of params trainable)
-- fp32 (the slow Mamba fallback produces NaN in fp16 - safe to use fp32 even with CUDA kernels)
-- Batch size 2, gradient accumulation 8 (effective batch 16)
-- Early stopping patience 3
-- Combined loss: causal LM + emotional valence MSE + focus topics BCE + 0.1 * next event CE
+Training details (370M):
+- fp32 (the sequential fallback path produces NaN in fp16)
+- Batch size 2, gradient accumulation 8
 
-Expected output:
-```
-Epoch 1/10 - train_loss: 3.87, val_loss: 2.98, valence_mae: 0.42, next_acc: 0.89
-...
-Epoch 7/10 - Early stopping
-Best val_loss: 2.49
-Merged model saved: output/merged_model
-```
+### 8. Convert to GGUF
 
-### 9. Convert to GGUF
-
+**For 2.8B (two-step: F16 then Q8_0):**
 ```bash
-# Clone llama.cpp for the convert script
-git clone --depth 1 https://github.com/ggerganov/llama.cpp.git /tmp/llama-cpp
+# Use the conversion script
+bash scripts/convert_mamba_2.8b.sh
 
-python /tmp/llama-cpp/convert_hf_to_gguf.py \
+# Or manually:
+python /path/to/llama.cpp/convert_hf_to_gguf.py \
+  output/merged_model \
+  --outfile output/mamba-2.8b-user-f16.gguf \
+  --outtype f16
+
+/path/to/llama.cpp/build/bin/llama-quantize \
+  output/mamba-2.8b-user-f16.gguf \
+  output/mamba-2.8b-user-q8_0.gguf \
+  Q8_0
+```
+
+**For 370M (direct Q8_0):**
+```bash
+python /path/to/llama.cpp/convert_hf_to_gguf.py \
   output/merged_model \
   --outtype q8_0 \
   --outfile output/mamba-370m-user-q8_0.gguf
 ```
 
-### 10. Deploy
+### 9. Deploy
 
-Copy the GGUF and head weights to your Luna Streams deployment:
+Copy the GGUF and head weights to your model directory:
 
 ```bash
-cp output/mamba-370m-user-q8_0.gguf /path/to/luna-streams/models/mamba-370m/
-cp output/mlp_heads.safetensors /path/to/luna-streams/models/mamba-370m/
+# For 2.8B GPU deployment
+cp output/mamba-2.8b-user-q8_0.gguf /path/to/models/mamba-2.8b/
+cp output/mlp_heads.safetensors /path/to/models/mamba-2.8b/
 ```
 
-Update your environment or `docker-compose.yml`:
+Update environment or systemd service:
 ```
-STREAMS_GGUF_MODEL=mamba-370m/mamba-370m-user-q8_0.gguf
-STREAMS_MLP_HEADS_PATH=mamba-370m/mlp_heads.safetensors
+STREAMS_GGUF_MODEL=mamba-2.8b/mamba-2.8b-user-q8_0.gguf
+STREAMS_MLP_HEADS_PATH=mamba-2.8b/mlp_heads.safetensors
+STREAMS_HIDDEN_DIM=2560
+STREAMS_GGUF_N_GPU_LAYERS=-1
 ```
 
-Restart luna-streams. Verify with:
+Restart and verify:
 ```bash
+sudo systemctl restart luna-streams
 curl http://localhost:8100/api/streams/user_model/state
 ```
 
-You should see `head_outputs` with real `emotional_valence`, `focus_topics`, and `next_event_type` values.
+You should see `head_outputs` with non-zero `state_norm`, `emotional_valence`, `focus_topics`, and `next_event_type` values.
 
-### 11. Restart GPU services
+### 10. Restart GPU services
 
 ```bash
 systemctl start ollama
@@ -190,33 +218,53 @@ systemctl start ollama
 
 ## Config Reference
 
-See `configs/stream1_user.yaml` for all tunable parameters:
+Two config files available:
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `model.base` | mamba-370m-hf | HuggingFace model ID |
-| `lora.rank` | 16 | LoRA rank (higher = more capacity, more VRAM) |
-| `lora.alpha` | 32 | LoRA alpha (typically 2x rank) |
-| `training.batch_size` | 2 | Batch size (limited by VRAM) |
-| `training.learning_rate` | 2e-4 | AdamW learning rate |
-| `training.max_epochs` | 10 | Maximum training epochs |
-| `training.max_seq_length` | 128 | Token sequence length |
-| `training.early_stopping_patience` | 3 | Epochs without improvement before stopping |
+| Config | Model | VRAM | dtype |
+|--------|-------|------|-------|
+| `configs/stream1_user.yaml` | mamba-370m-hf | ~4GB | fp32 |
+| `configs/stream1_user_2.8b.yaml` | mamba-2.8b-hf | ~10GB | fp16 |
+
+Key parameters:
+
+| Parameter | 370M | 2.8B | Description |
+|-----------|------|------|-------------|
+| `model.base` | mamba-370m-hf | mamba-2.8b-hf | HuggingFace model ID |
+| `model.hidden_dim` | 1024 | 2560 | Hidden state dimension |
+| `lora.rank` | 16 | 16 | LoRA rank |
+| `lora.alpha` | 32 | 32 | LoRA alpha (2x rank) |
+| `training.batch_size` | 2 | 1 | Batch size (limited by VRAM) |
+| `training.gradient_accumulation` | 8 | 16 | Effective batch = batch_size * grad_accum |
+| `training.learning_rate` | 2e-4 | 1e-4 | AdamW learning rate |
+| `training.fp16` | false | true | Mixed precision training |
+| `training.max_seq_length` | 128 | 128 | Token sequence length |
+
+## State Migration
+
+When upgrading from 370M to 2.8B:
+- Archive old state: `mv state/ state_370m_backup/`
+- Fresh start required -- 1024-dim EMA buffers are incompatible with 2560-dim
+- Old 370M models stay in `models/mamba-370m/` for rollback
+- Rollback: set env vars back to 370M paths, `HIDDEN_DIM=1024`, `N_GPU_LAYERS=0`
 
 ## Security
 
-The fine-tuned GGUF and head weights encode patterns from your personal data. They are not raw data, but memorization is possible with small datasets. Treat these files as sensitive - do not publish or share them. The `.gitignore` excludes `*.gguf`, `*.safetensors`, and `training/data_prep/raw/`.
+The fine-tuned GGUF and head weights encode patterns from your personal data. They are not raw data, but memorization is possible with small datasets. Treat these files as sensitive -- do not publish or share them. The `.gitignore` excludes `*.gguf`, `*.safetensors`, and `training/data_prep/raw/`.
 
 ## Troubleshooting
 
-**OOM during training**: Reduce `batch_size` to 1, reduce `max_seq_length` to 64, or enable gradient checkpointing (already enabled in train.py).
+**OOM during training**: Reduce `batch_size` to 1, reduce `max_seq_length` to 64, or enable gradient checkpointing (enabled by default for 2.8B).
 
-**NaN losses**: Ensure you're using fp32 (dtype=torch.float32). The Mamba sequential fallback path is numerically unstable in fp16.
+**NaN losses (370M)**: Ensure you're using fp32. The Mamba sequential fallback path is numerically unstable in fp16. The 2.8B config uses fp16 safely because CUDA kernels handle the compute.
 
 **PEFT error on out_proj**: Mamba's out_proj is blocked by PEFT. Only use `in_proj`, `x_proj`, `dt_proj` as LoRA targets.
 
 **causal_conv1d_fwd argument mismatch**: Version mismatch between causal-conv1d and mamba-ssm. Use causal-conv1d v1.4.0 with mamba-ssm v2.2.4.
 
-**ABI symbol errors (undefined symbol)**: The CUDA kernels were compiled against a different PyTorch version. Rebuild both from source with `--no-build-isolation`.
+**ABI symbol errors (undefined symbol: _ZN3c10...)**: The CUDA kernels were compiled against a different PyTorch version. Uninstall both packages, clear pip cache and any cached .so files, rebuild both from source with `--no-build-isolation` and `--no-cache-dir`.
 
 **Training extremely slow (40+ min/epoch)**: CUDA kernels not loaded. Mamba is falling back to sequential CPU path. Install mamba-ssm with CUDA support (see step 2).
+
+**Root disk full during training**: HF model cache and pip build artifacts can consume 20GB+. Set `HF_HOME` to a larger disk, or symlink `~/.cache/huggingface` to an external drive.
+
+**logits_all=True**: When using llama-cpp-python for inference, the Llama constructor MUST include `logits_all=True` or `model.scores` will be all zeros after `eval()`. This is a llama-cpp-python behavior, not a model issue.
