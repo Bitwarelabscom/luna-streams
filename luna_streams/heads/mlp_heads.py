@@ -4,7 +4,7 @@ Loads trained head weights (safetensors) and runs forward passes
 without PyTorch. Designed for deployment on the Hetzner server
 where we only have numpy + llama-cpp-python.
 
-Each head: hidden_state -> Linear(1024, 256) -> ReLU -> Linear(256, out_dim) -> activation
+Each head: hidden_state -> Linear(hidden_dim, 256) -> ReLU -> Linear(256, out_dim) -> activation
 """
 
 import logging
@@ -142,12 +142,12 @@ class HeadManager:
         return self._loaded
 
 
-def create_user_model_heads(weights_path: Optional[str] = None) -> HeadManager:
+def create_user_model_heads(weights_path: Optional[str] = None, hidden_dim: int = 1024) -> HeadManager:
     """Create and optionally load the user model head configuration."""
     manager = HeadManager()
-    manager.register_head("emotional_valence", [1024, 256, 1], activation="tanh")
-    manager.register_head("focus_topics", [1024, 256, 50], activation="softmax")
-    manager.register_head("next_event", [1024, 128, 4], activation="softmax")
+    manager.register_head("emotional_valence", [hidden_dim, 256, 1], activation="tanh")
+    manager.register_head("focus_topics", [hidden_dim, 256, 50], activation="softmax")
+    manager.register_head("next_event", [hidden_dim, 128, 4], activation="softmax")
 
     if weights_path:
         manager.load_all(weights_path)

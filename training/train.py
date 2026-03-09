@@ -196,49 +196,72 @@ def train_epoch(
     n_batches = 0
     aux_weight = config["training"].get("aux_loss_weight", 0.1)
     replay_ratio = config["training"].get("replay_mix_ratio", 0.1)
+    grad_accum = config["training"].get("gradient_accumulation", 1)
+    use_fp16 = config["training"].get("fp16", False) and device.type == "cuda"
+    scaler = torch.amp.GradScaler("cuda") if use_fp16 else None
 
-    for batch in train_loader:
+    optimizer.zero_grad()
+
+    for batch_idx, batch in enumerate(train_loader):
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
         valence_labels = batch["valence_label"].to(device)
         topics_labels = batch["topics_label"].to(device)
         next_type_labels = batch["next_type_label"].to(device)
 
-        # Forward through Mamba
-        hidden, outputs = extract_hidden_state(model, input_ids, attention_mask)
+        # Forward through Mamba (with autocast for fp16)
+        with torch.amp.autocast("cuda", enabled=use_fp16):
+            hidden, outputs = extract_hidden_state(model, input_ids, attention_mask)
 
-        # Causal LM loss
-        lm_logits = outputs.logits
-        shift_logits = lm_logits[:, :-1, :].contiguous()
-        shift_labels = input_ids[:, 1:].contiguous()
-        lm_loss = nn.functional.cross_entropy(
-            shift_logits.view(-1, shift_logits.size(-1)),
-            shift_labels.view(-1),
-            ignore_index=0,  # padding
-        )
+            # Causal LM loss
+            lm_logits = outputs.logits
+            shift_logits = lm_logits[:, :-1, :].contiguous()
+            shift_labels = input_ids[:, 1:].contiguous()
+            lm_loss = nn.functional.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=0,  # padding
+            )
 
-        # Head losses
-        valence_pred = heads["emotional_valence"](hidden)
-        valence_loss = nn.functional.mse_loss(valence_pred, valence_labels)
+            # Head losses (cast hidden to float32 for heads)
+            hidden_f32 = hidden.float()
+            valence_pred = heads["emotional_valence"](hidden_f32)
+            valence_loss = nn.functional.mse_loss(valence_pred, valence_labels)
 
-        topics_logits = heads["focus_topics"](hidden)
-        topics_loss = nn.functional.binary_cross_entropy_with_logits(topics_logits, topics_labels)
+            topics_logits = heads["focus_topics"](hidden_f32)
+            topics_loss = nn.functional.binary_cross_entropy_with_logits(topics_logits, topics_labels)
 
-        next_pred = heads["next_event"](hidden)
-        next_loss = nn.functional.cross_entropy(next_pred, next_type_labels)
+            next_pred = heads["next_event"](hidden_f32)
+            next_loss = nn.functional.cross_entropy(next_pred, next_type_labels)
 
-        # Combined loss - compute in fp32 for stability
-        loss = (lm_loss + valence_loss + topics_loss + aux_weight * next_loss).float()
+            # Combined loss scaled for gradient accumulation
+            loss = (lm_loss + valence_loss + topics_loss + aux_weight * next_loss).float()
+            loss = loss / grad_accum
 
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(
-            list(model.parameters()) + [p for h in heads.values() for p in h.parameters()],
-            max_norm=1.0,
-        )
-        optimizer.step()
+        if scaler is not None:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
 
-        total_loss += loss.item()
+        # Step optimizer every grad_accum batches
+        if (batch_idx + 1) % grad_accum == 0 or (batch_idx + 1) == len(train_loader):
+            if scaler is not None:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(
+                    list(model.parameters()) + [p for h in heads.values() for p in h.parameters()],
+                    max_norm=1.0,
+                )
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                torch.nn.utils.clip_grad_norm_(
+                    list(model.parameters()) + [p for h in heads.values() for p in h.parameters()],
+                    max_norm=1.0,
+                )
+                optimizer.step()
+            optimizer.zero_grad()
+
+        total_loss += loss.item() * grad_accum  # undo the scaling for logging
         n_batches += 1
 
         # Add to replay buffer
@@ -352,10 +375,14 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Use fp32 - the slow Mamba path produces NaN in fp16
+    # fp16 for 2.8B to fit in 10GB VRAM, fp32 for 370M (Mamba can NaN in fp16 on some configs)
+    use_fp16 = config["training"].get("fp16", False) and device.type == "cuda"
+    model_dtype = torch.float16 if use_fp16 else torch.float32
+    print(f"Model dtype: {model_dtype}")
+
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        dtype=torch.float32,
+        torch_dtype=model_dtype,
     ).to(device)
 
     # Apply LoRA
@@ -464,9 +491,9 @@ def main():
 
     print(f"""
 Post-training steps:
-  1. Convert to GGUF: python convert_hf_to_gguf.py {merged_path} --outtype q8_0
-  2. Copy GGUF to Hetzner: scp output/*.gguf hetzner:/opt/luna-streams/models/mamba-370m/
-  3. Copy heads: scp output/mlp_heads.safetensors hetzner:/opt/luna-streams/models/mamba-370m/
+  1. Convert to GGUF F16: python convert_hf_to_gguf.py {merged_path} --outfile output/model-f16.gguf --outtype f16
+  2. Quantize to Q8_0:     llama-quantize output/model-f16.gguf output/model-q8_0.gguf Q8_0
+  3. Deploy GGUF + heads to models/ directory
 """)
 
 

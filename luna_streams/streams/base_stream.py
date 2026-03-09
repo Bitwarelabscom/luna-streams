@@ -4,8 +4,8 @@ Handles model loading via llama.cpp GGUF, forward passes, state management,
 and event queue consumption. Concrete streams (user_model, knowledge_graph,
 conversation_dynamics) extend this with stream-specific logic.
 
-Inference path: mamba-370m-hf Q8_0 GGUF via llama-cpp-python
-Benchmark result: 97ms mean latency, 10.3 events/sec, 509MB RAM
+Inference path: Mamba GGUF via llama-cpp-python (CPU or GPU)
+Supports Mamba 370M (1024-dim) and Mamba 2.8B (2560-dim).
 """
 
 import logging
@@ -27,7 +27,7 @@ logger = logging.getLogger("luna_streams.stream")
 class BaseStream(ABC):
     """Abstract base for a Mamba stream."""
 
-    def __init__(self, name: str, hidden_dim: int = 1024):
+    def __init__(self, name: str, hidden_dim: int = settings.hidden_dim):
         self.name = name
         self.hidden_dim = hidden_dim
         self.ema = EMABuffer(dim=hidden_dim, decay=settings.ema_decay)
@@ -68,11 +68,14 @@ class BaseStream(ABC):
                 n_ctx=settings.gguf_n_ctx,
                 n_threads=settings.gguf_n_threads,
                 n_threads_batch=settings.gguf_n_threads,
+                n_gpu_layers=settings.gguf_n_gpu_layers,
+                logits_all=True,
                 verbose=False,
             )
+            gpu_info = f", gpu_layers={settings.gguf_n_gpu_layers}" if settings.gguf_n_gpu_layers != 0 else ""
             logger.info(
                 f"Loaded GGUF model for {self.name}: {model_path} "
-                f"(n_ctx={settings.gguf_n_ctx}, threads={settings.gguf_n_threads})"
+                f"(n_ctx={settings.gguf_n_ctx}, threads={settings.gguf_n_threads}{gpu_info})"
             )
         except Exception as e:
             logger.error(f"Failed to load GGUF model for {self.name}: {e}")
@@ -132,8 +135,8 @@ class BaseStream(ABC):
         # since llama.cpp doesn't expose intermediate SSM states directly
         scores = self.model.scores
         if scores is not None and len(scores) > 0:
-            # Last token's logits - take first hidden_dim components
-            logits = np.array(scores[-1], dtype=np.float32)
+            # Last token's logits (index by token count, not -1)
+            logits = np.array(scores[len(tokens) - 1], dtype=np.float32)
             # Project to hidden_dim via hashing/folding if vocab > hidden_dim
             if len(logits) > self.hidden_dim:
                 # Fold the logit vector down to hidden_dim

@@ -19,6 +19,10 @@ class Settings(BaseSettings):
     gguf_model: str = "mamba-370m/mamba-370m-user-q8_0.gguf"
     gguf_n_ctx: int = 256
     gguf_n_threads: int = 8
+    gguf_n_gpu_layers: int = 0  # 0=CPU-only (backward compat), -1=all layers on GPU
+
+    # Model dimensions
+    hidden_dim: int = 1024  # 1024 for 370M, 2560 for 2.8B
 
     # Trained MLP heads
     mlp_heads_path: str = "mamba-370m/mlp_heads.safetensors"

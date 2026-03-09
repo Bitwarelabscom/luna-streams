@@ -1,0 +1,58 @@
+# Stream 1: User Model - LoRA fine-tuning config for Mamba 2.8B
+# Train on RTX 3080 (10GB VRAM) - fp16 + gradient checkpointing
+
+model:
+  base: "state-spaces/mamba-2.8b-hf"
+  hidden_dim: 2560
+  num_layers: 64
+  vocab_size: 50280
+
+lora:
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - "in_proj"
+    - "x_proj"
+    - "dt_proj"
+  # Note: out_proj and conv1d are blocked by PEFT for Mamba models
+
+training:
+  learning_rate: 1.0e-4       # Lower LR for larger model
+  batch_size: 1               # 2.8B needs more VRAM per sample
+  gradient_accumulation: 16   # Compensate for smaller batch
+  max_epochs: 10
+  warmup_steps: 200
+  weight_decay: 0.01
+  max_seq_length: 128
+  early_stopping_patience: 3
+  fp16: true                  # Required to fit in 10GB VRAM
+  gradient_checkpointing: true
+
+  # Forgetting prevention
+  replay_buffer_size: 1000
+  replay_mix_ratio: 0.1
+
+  # Auxiliary loss
+  next_event_prediction: true
+  aux_loss_weight: 0.1
+
+heads:
+  emotional_valence:
+    type: mlp
+    layers: [2560, 256, 1]
+    activation: tanh
+    output_range: [-1.0, 1.0]
+
+  focus_topics:
+    type: mlp
+    layers: [2560, 256, 50]
+    activation: softmax
+    top_k: 5
+
+  next_event:
+    type: mlp
+    layers: [2560, 128, 4]
+    activation: softmax
+
+  # drift_signal: computed directly, no training needed

@@ -15,16 +15,19 @@ services:
       - STREAMS_MODEL_DIR=/app/models
       - STREAMS_AUTO_SAVE_INTERVAL_SEC=300
       - STREAMS_SNAPSHOT_RETENTION=3
-      # GGUF inference (llama.cpp)
-      - STREAMS_GGUF_MODEL=mamba-370m/mamba-370m-user-q8_0.gguf
-      - STREAMS_MLP_HEADS_PATH=mamba-370m/mlp_heads.safetensors
+      # GGUF inference (llama.cpp with GPU offload)
+      - STREAMS_GGUF_MODEL=mamba-2.8b/mamba-2.8b-user-q8_0.gguf
+      - STREAMS_MLP_HEADS_PATH=mamba-2.8b/mlp_heads.safetensors
       - STREAMS_GGUF_N_CTX=256
-      - STREAMS_GGUF_N_THREADS=8
-      # Qwen bridge (Option B - text summaries via Ollama)
-      - STREAMS_QWEN_OLLAMA_URL=http://10.0.0.30:11434
+      - STREAMS_GGUF_N_THREADS=2
+      - STREAMS_GGUF_N_GPU_LAYERS=-1
+      - STREAMS_HIDDEN_DIM=2560
+      # Qwen bridge (localhost - same machine as Ollama)
+      - STREAMS_QWEN_OLLAMA_URL=http://host.docker.internal:11434
       - STREAMS_QWEN_MODEL=qwen3.5:9b
-      # CPU tuning
-      - OMP_NUM_THREADS=8
+      # GPU tuning
+      - OMP_NUM_THREADS=2
+      - NVIDIA_VISIBLE_DEVICES=1
     volumes:
       - ./models:/app/models:ro
       - ./state:/app/state
@@ -35,7 +38,13 @@ services:
     cap_drop:
       - ALL
     mem_limit: 16g
-    cpus: "4.0"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1']
+              capabilities: [gpu]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:8100/health"]
       interval: 30s

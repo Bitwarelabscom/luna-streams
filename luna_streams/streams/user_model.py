@@ -24,11 +24,14 @@ class UserModelStream(BaseStream):
     """Stream 1 - User behavioral model."""
 
     def __init__(self):
-        super().__init__(name="user_model", hidden_dim=1024)
+        super().__init__(name="user_model")
 
         # Load trained MLP heads
         heads_path = Path(settings.model_dir) / settings.mlp_heads_path
-        self.head_manager = create_user_model_heads(str(heads_path))
+        self.head_manager = create_user_model_heads(
+            weights_path=str(heads_path),
+            hidden_dim=self.hidden_dim,
+        )
         if self.head_manager.is_loaded:
             logger.info(f"Loaded trained MLP heads from {heads_path}")
         else:
